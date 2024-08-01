@@ -1,9 +1,14 @@
 from prometheus_client import start_http_server, Gauge
 import os
+import re
 import sys
 import subprocess
 import json
 import logging
+
+igpu_device_id = Gauge(
+    "igpu_device_id", "Intel GPU device id"
+)
 
 igpu_engines_blitter_0_busy = Gauge(
     "igpu_engines_blitter_0_busy", "Blitter 0 busy utilisation %"
@@ -129,6 +134,18 @@ if __name__ == "__main__":
 
     period = os.getenv("REFRESH_PERIOD_MS", 1000)
     device = os.getenv("DEVICE")
+
+    # Detect device id for reporting
+    list_cmd = "intel_gpu_top -L"
+    out, _ = subprocess.Popen(
+        list_cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    ).communicate()
+    out = out.decode()
+
+    device_id = "0x" + re.search("device=(\d+)", out.splitlines()[0]).groups()[0]
+    device_id = int(device_id, 16)
+
+    igpu_device_id.set(device_id)
 
     if device is not None:
         cmd = "intel_gpu_top -J -s {} -d {}".format(int(period), device)
