@@ -36,8 +36,3 @@ RUN \
 
 ENTRYPOINT ["/usr/bin/catatonit", "--", "/usr/local/bin/python"]
 CMD ["/app/intel-gpu-exporter.py"]
-
-LABEL \
-    org.opencontainers.image.title="intel-gpu-exporter" \
-    org.opencontainers.image.authors="Devin Buhl <devin.kray@gmail.com>" \
-    org.opencontainers.image.source="https://github.com/onedr0p/intel-gpu-exporter"
