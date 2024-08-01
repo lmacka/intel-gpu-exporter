@@ -30,6 +30,9 @@ services:
 ## Metrics
 
 ```bash
+# HELP igpu_device_id Intel GPU device id
+# TYPE igpu_device_id gauge
+igpu_device_id 12677.0
 # HELP igpu_engines_blitter_0_busy Blitter 0 busy utilisation %
 # TYPE igpu_engines_blitter_0_busy gauge
 igpu_engines_blitter_0_busy 0.0
