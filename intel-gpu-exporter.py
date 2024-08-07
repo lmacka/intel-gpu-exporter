@@ -142,7 +142,7 @@ if __name__ == "__main__":
     ).communicate()
     out = out.decode()
 
-    device_id = "0x" + re.search(r"device=(\d+)", out.splitlines()[0]).groups()[0]
+    device_id = "0x" + re.search(r"device=(\w+)", out.splitlines()[0]).groups()[0]
     device_id = int(device_id, 16)
 
     igpu_device_id.set(device_id)
