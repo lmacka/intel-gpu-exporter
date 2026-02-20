@@ -168,7 +168,7 @@ if __name__ == "__main__":
         debug = logging.INFO
     logging.basicConfig(format="%(asctime)s - %(message)s", level=debug)
 
-    start_http_server(8080)
+    start_http_server(int(os.getenv("LISTEN_PORT", 9080)))
 
     period = os.getenv("REFRESH_PERIOD_MS", 1000)
     device = os.getenv("DEVICE")
