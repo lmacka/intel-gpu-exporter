@@ -1,4 +1,4 @@
-from prometheus_client import start_http_server, Gauge
+from prometheus_client import start_http_server, Gauge, Counter
 import glob
 import os
 import re
@@ -89,8 +89,21 @@ igpu_engines_busy_max = Gauge(
 
 # Intel NPU (VPU) metrics via /sys/class/accel sysfs (kernel 6.11+)
 inpu_busy = Gauge("inpu_busy", "Intel NPU busy utilisation %")
-inpu_frequency_mhz = Gauge("inpu_frequency_mhz", "Intel NPU current frequency MHz")
-inpu_frequency_max_mhz = Gauge("inpu_frequency_max_mhz", "Intel NPU max frequency MHz")
+inpu_busy_time_us_total = Counter(
+    "inpu_busy_time_us_total",
+    "Intel NPU cumulative busy time microseconds",
+)
+inpu_frequency_actual = Gauge(
+    "inpu_frequency_actual",
+    "Intel NPU current frequency MHz (peak sampled over poll interval)",
+)
+inpu_frequency_max = Gauge("inpu_frequency_max", "Intel NPU maximum frequency MHz")
+
+# Intel SoC package power via RAPL (fallback / supplement to igpu_power_package
+# which is unreliable on Core Ultra / Xe driver)
+isoc_power_package_watts = Gauge(
+    "isoc_power_package_watts", "Intel SoC package power from RAPL W"
+)
 
 
 def _read_int(path):
@@ -111,7 +124,11 @@ def find_npu_device():
 
 
 def npu_poll_loop(device_dir, interval_sec):
-    """Poll NPU sysfs entries and update gauges until process exit."""
+    """Poll NPU sysfs entries and update gauges/counter until process exit.
+
+    Frequency is peak-sampled many times per interval because the NPU aggressively
+    clock-gates between inference bursts and a single-shot read usually returns 0.
+    """
     busy_path = os.path.join(device_dir, "npu_busy_time_us")
     freq_path = os.path.join(device_dir, "npu_current_frequency_mhz")
     freq_max_path = os.path.join(device_dir, "npu_max_frequency_mhz")
@@ -119,39 +136,56 @@ def npu_poll_loop(device_dir, interval_sec):
     # Max frequency is static — read once
     fmax = _read_int(freq_max_path)
     if fmax is not None:
-        inpu_frequency_max_mhz.set(fmax)
+        inpu_frequency_max.set(fmax)
+
+    samples_per_interval = 20
+    sub_interval = interval_sec / samples_per_interval
 
     last_busy_us = None
     last_time_ns = None
+    counter_last_us = None
 
     while True:
+        # Peak-sample frequency across the interval
+        max_freq = 0
+        for _ in range(samples_per_interval):
+            f = _read_int(freq_path)
+            if f is not None and f > max_freq:
+                max_freq = f
+            time.sleep(sub_interval)
+        inpu_frequency_actual.set(max_freq)
+
+        # Read busy_time at the end of the interval for accurate delta
         try:
             now_ns = time.monotonic_ns()
             busy_us = _read_int(busy_path)
 
-            if busy_us is not None and last_busy_us is not None:
-                delta_busy_us = busy_us - last_busy_us
-                delta_time_us = (now_ns - last_time_ns) / 1000.0
-                if delta_time_us > 0:
-                    pct = (delta_busy_us / delta_time_us) * 100.0
-                    # Clamp to [0, 100] in case of rollover/jitter
-                    if pct < 0:
-                        pct = 0.0
-                    elif pct > 100:
-                        pct = 100.0
-                    inpu_busy.set(pct)
-
             if busy_us is not None:
+                # Drive the Counter (monotonically increasing)
+                if counter_last_us is None:
+                    counter_last_us = busy_us
+                elif busy_us >= counter_last_us:
+                    inpu_busy_time_us_total.inc(busy_us - counter_last_us)
+                    counter_last_us = busy_us
+                else:
+                    # Counter reset (driver reload / wraparound) — rebase
+                    counter_last_us = busy_us
+
+                # Drive the busy % Gauge
+                if last_busy_us is not None and last_time_ns is not None:
+                    delta_busy_us = busy_us - last_busy_us
+                    delta_time_us = (now_ns - last_time_ns) / 1000.0
+                    if delta_time_us > 0 and delta_busy_us >= 0:
+                        pct = (delta_busy_us / delta_time_us) * 100.0
+                        if pct < 0:
+                            pct = 0.0
+                        elif pct > 100:
+                            pct = 100.0
+                        inpu_busy.set(pct)
                 last_busy_us = busy_us
                 last_time_ns = now_ns
-
-            fcur = _read_int(freq_path)
-            if fcur is not None:
-                inpu_frequency_mhz.set(fcur)
         except Exception as e:
             logging.warning("NPU poll error: %s", e)
-
-        time.sleep(interval_sec)
 
 
 def start_npu_monitor():
@@ -164,6 +198,63 @@ def start_npu_monitor():
     interval = float(os.getenv("NPU_POLL_INTERVAL_SEC", "1"))
     t = threading.Thread(
         target=npu_poll_loop, args=(device_dir, interval), daemon=True
+    )
+    t.start()
+
+
+def find_package_rapl():
+    """Find the package-0 RAPL zone under /sys/class/powercap."""
+    for path in sorted(glob.glob("/sys/class/powercap/intel-rapl:*")):
+        name_path = os.path.join(path, "name")
+        try:
+            with open(name_path) as f:
+                if f.read().strip() == "package-0":
+                    return path
+        except Exception:
+            pass
+    return None
+
+
+def rapl_poll_loop(rapl_dir, interval_sec):
+    """Compute SoC package power from RAPL energy counter deltas."""
+    energy_path = os.path.join(rapl_dir, "energy_uj")
+    max_energy_path = os.path.join(rapl_dir, "max_energy_range_uj")
+    max_energy_uj = _read_int(max_energy_path)
+
+    last_energy_uj = None
+    last_time_ns = None
+
+    while True:
+        try:
+            now_ns = time.monotonic_ns()
+            energy_uj = _read_int(energy_path)
+            if energy_uj is not None and last_energy_uj is not None:
+                delta_uj = energy_uj - last_energy_uj
+                if delta_uj < 0 and max_energy_uj:
+                    # Counter wrap
+                    delta_uj += max_energy_uj
+                delta_sec = (now_ns - last_time_ns) / 1e9
+                if delta_sec > 0 and delta_uj >= 0:
+                    watts = (delta_uj / 1e6) / delta_sec
+                    isoc_power_package_watts.set(watts)
+            if energy_uj is not None:
+                last_energy_uj = energy_uj
+                last_time_ns = now_ns
+        except Exception as e:
+            logging.warning("RAPL poll error: %s", e)
+        time.sleep(interval_sec)
+
+
+def start_rapl_monitor():
+    """Start RAPL package-power thread if the zone is available."""
+    rapl_dir = find_package_rapl()
+    if rapl_dir is None:
+        logging.info("No RAPL package-0 zone found, skipping RAPL monitoring")
+        return
+    logging.info("Found RAPL package-0 at %s, starting monitor", rapl_dir)
+    interval = float(os.getenv("RAPL_POLL_INTERVAL_SEC", "1"))
+    t = threading.Thread(
+        target=rapl_poll_loop, args=(rapl_dir, interval), daemon=True
     )
     t.start()
 
@@ -254,6 +345,7 @@ if __name__ == "__main__":
     start_http_server(int(os.getenv("LISTEN_PORT", 9080)))
 
     start_npu_monitor()
+    start_rapl_monitor()
 
     period = os.getenv("REFRESH_PERIOD_MS", 1000)
     device = os.getenv("DEVICE")
