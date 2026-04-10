@@ -1,10 +1,13 @@
 from prometheus_client import start_http_server, Gauge
+import glob
 import os
 import re
 import sys
 import subprocess
 import json
 import logging
+import threading
+import time
 
 # Engine key compatibility helper (MTL/Xe vs legacy /0 keys)
 # Returns first present value from candidate engine keys and coerces to float.
@@ -83,6 +86,86 @@ igpu_rc6 = Gauge("igpu_rc6", "RC6 %")
 igpu_engines_busy_max = Gauge(
     "igpu_engines_busy_max", "Maximum busy utilisation % across all engines"
 )
+
+# Intel NPU (VPU) metrics via /sys/class/accel sysfs (kernel 6.11+)
+inpu_busy = Gauge("inpu_busy", "Intel NPU busy utilisation %")
+inpu_frequency_mhz = Gauge("inpu_frequency_mhz", "Intel NPU current frequency MHz")
+inpu_frequency_max_mhz = Gauge("inpu_frequency_max_mhz", "Intel NPU max frequency MHz")
+
+
+def _read_int(path):
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def find_npu_device():
+    """Find first accel device exposing npu_busy_time_us. Returns device dir or None."""
+    for accel in sorted(glob.glob("/sys/class/accel/accel*")):
+        device_dir = os.path.join(accel, "device")
+        if os.path.exists(os.path.join(device_dir, "npu_busy_time_us")):
+            return device_dir
+    return None
+
+
+def npu_poll_loop(device_dir, interval_sec):
+    """Poll NPU sysfs entries and update gauges until process exit."""
+    busy_path = os.path.join(device_dir, "npu_busy_time_us")
+    freq_path = os.path.join(device_dir, "npu_current_frequency_mhz")
+    freq_max_path = os.path.join(device_dir, "npu_max_frequency_mhz")
+
+    # Max frequency is static — read once
+    fmax = _read_int(freq_max_path)
+    if fmax is not None:
+        inpu_frequency_max_mhz.set(fmax)
+
+    last_busy_us = None
+    last_time_ns = None
+
+    while True:
+        try:
+            now_ns = time.monotonic_ns()
+            busy_us = _read_int(busy_path)
+
+            if busy_us is not None and last_busy_us is not None:
+                delta_busy_us = busy_us - last_busy_us
+                delta_time_us = (now_ns - last_time_ns) / 1000.0
+                if delta_time_us > 0:
+                    pct = (delta_busy_us / delta_time_us) * 100.0
+                    # Clamp to [0, 100] in case of rollover/jitter
+                    if pct < 0:
+                        pct = 0.0
+                    elif pct > 100:
+                        pct = 100.0
+                    inpu_busy.set(pct)
+
+            if busy_us is not None:
+                last_busy_us = busy_us
+                last_time_ns = now_ns
+
+            fcur = _read_int(freq_path)
+            if fcur is not None:
+                inpu_frequency_mhz.set(fcur)
+        except Exception as e:
+            logging.warning("NPU poll error: %s", e)
+
+        time.sleep(interval_sec)
+
+
+def start_npu_monitor():
+    """Start NPU monitoring thread if an Intel NPU is available."""
+    device_dir = find_npu_device()
+    if device_dir is None:
+        logging.info("No Intel NPU detected, skipping NPU monitoring")
+        return
+    logging.info("Found Intel NPU at %s, starting monitor", device_dir)
+    interval = float(os.getenv("NPU_POLL_INTERVAL_SEC", "1"))
+    t = threading.Thread(
+        target=npu_poll_loop, args=(device_dir, interval), daemon=True
+    )
+    t.start()
 
 
 
@@ -169,6 +252,8 @@ if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)s - %(message)s", level=debug)
 
     start_http_server(int(os.getenv("LISTEN_PORT", 9080)))
+
+    start_npu_monitor()
 
     period = os.getenv("REFRESH_PERIOD_MS", 1000)
     device = os.getenv("DEVICE")
