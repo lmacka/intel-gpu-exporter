@@ -2,6 +2,8 @@
 
 Prometheus exporter for Intel integrated GPU, NPU, and SoC power on Linux.
 
+![Intel SoC Metrics dashboard](docs/grafana-dashboard.png)
+
 > Fork of [onedr0p/intel-gpu-exporter](https://github.com/onedr0p/intel-gpu-exporter)
 > (via [bjia56/intel-gpu-exporter](https://github.com/bjia56/intel-gpu-exporter)).
 > Actively used in production on Intel NUC Meteor Lake (Core Ultra) nodes running
@@ -229,6 +231,22 @@ Ultra / Xe driver where `igpu_power_package` returns 0.
   output (no trailing commas, brace-depth counter).
 - **Graceful collector absence**: NPU and RAPL collectors no-op if sysfs entries
   are missing, so one image works on any node.
+
+## Example Grafana dashboard
+
+A complete dashboard showing all three metric families (iGPU, NPU, RAPL power) across
+a multi-node cluster is provided at `examples/intel-soc-dashboard.json`.
+
+Panel types used: text (header), stat (per-node power cards with trend), bargauge
+(current-state comparisons), timeseries (historical trends), status-history (NPU
+busy heatmap per node), gauge (radial NPU frequency), state-timeline (GPU activity
+derived from RC6). Node colour coding is applied consistently across every panel.
+
+Import via Grafana UI: Dashboards → New → Import → paste the JSON. The dashboard
+expects a Prometheus datasource and a `job="intel-gpu"` label on the scraped
+endpoints (standard for the ServiceMonitor shown above).
+
+A simpler single-panel example is also available at `examples/simple-grafana-dash.json`.
 
 ## Building
 
