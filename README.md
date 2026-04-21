@@ -6,8 +6,14 @@ Prometheus exporter for Intel integrated GPU, NPU, and SoC power on Linux.
 
 > Fork of [onedr0p/intel-gpu-exporter](https://github.com/onedr0p/intel-gpu-exporter)
 > (via [bjia56/intel-gpu-exporter](https://github.com/bjia56/intel-gpu-exporter)).
-> Actively used in production on Intel NUC Meteor Lake (Core Ultra) nodes running
-> Talos Linux / Kubernetes. Frigate is the primary workload exercising the NPU.
+> Running in production on Intel NUC Meteor Lake (Core Ultra) nodes under
+> Talos Linux 1.13 / Kubernetes. Frigate is the primary NPU workload.
+>
+> NPU support on Talos required upstream enablement. Both pieces — a kernel
+> config change in [siderolabs/pkgs#1465](https://github.com/siderolabs/pkgs/pull/1465)
+> and a new `intel-npu` system extension in
+> [siderolabs/extensions#986](https://github.com/siderolabs/extensions/pull/986) —
+> were merged Feb 2026 and ship in Talos 1.13.0-rc.0.
 
 ## What it exposes
 
@@ -32,6 +38,25 @@ any subset of (iGPU, NPU, RAPL).
 - `/dev/dri/*` for iGPU
 - `/sys/class/powercap/intel-rapl:0` for SoC power
 - Runs as a privileged container because `intel_gpu_top` needs PMU access
+
+### Talos Linux users
+
+The Intel VPU driver (`intel_vpu.ko`) was not built into Talos kernels before
+v1.13. To get NPU metrics on Talos, you need:
+
+1. **Talos v1.13.0-rc.0 or newer** — kernel compiled with
+   `CONFIG_DRM_ACCEL_IVPU=m` ([siderolabs/pkgs#1465](https://github.com/siderolabs/pkgs/pull/1465))
+2. The **`intel-npu`** system extension enabled in your machine config — adds
+   the compiled module plus VPU firmware, covers Meteor Lake, Arrow Lake /
+   Lunar Lake, and Panther Lake
+   ([siderolabs/extensions#986](https://github.com/siderolabs/extensions/pull/986))
+
+Enable the extension via the [Talos Image Factory](https://factory.talos.dev/),
+talhelper, or whatever mechanism your install uses — see the
+[system extensions docs](https://www.talos.dev/v1.13/talos-guides/configuration/system-extensions/).
+
+Without both, the exporter will log `No Intel NPU detected, skipping NPU
+monitoring` and continue with iGPU + RAPL collectors only.
 
 ## Docker Compose
 
