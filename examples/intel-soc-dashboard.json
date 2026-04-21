@@ -754,8 +754,9 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "inpu_busy{instance=~\"$instance\",job=\"intel-gpu\"}",
+          "expr": "avg_over_time(inpu_busy{instance=~\"$instance\",job=\"intel-gpu\"}[$__rate_interval])",
           "legendFormat": "{{instance}}",
+          "interval": "$__rate_interval",
           "range": true,
           "refId": "A"
         }
@@ -1631,6 +1632,6 @@
   "timezone": "",
   "title": "Intel SoC Metrics (GPU, NPU, RAPL)",
   "uid": "intel-soc-metrics",
-  "version": 1,
+  "version": 2,
   "id": null
 }
